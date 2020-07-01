@@ -36,3 +36,8 @@
 	font-weight: bold;
 	transition-duration: 0;
 }
+
+.doneTaskEntry {
+	text-decoration: line-through;
+	color: black;
+}

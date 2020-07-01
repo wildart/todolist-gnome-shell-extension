@@ -21,16 +21,20 @@ const GObject = imports.gi.GObject;
 const Gettext = imports.gettext;
 const _ = Gettext.domain('todolist').gettext;
 
-const Utils = imports.misc.extensionUtils.getCurrentExtension().imports.utils;
+const ExtensionUtils = imports.misc.extensionUtils;
+const Utils = ExtensionUtils.getCurrentExtension().imports.utils;
 const ExtensionSettings = Utils.getSettings(); // Get settings from utils.js
 
 const MAX_LENGTH = 100;
 const KEY_RETURN = 65293;
 const KEY_ENTER  = 65421;
-const BASE_TASKS = "Do something\nDo something else\nDo more stuff\nDo that again\n";
+const BASE_TASKS = '[{"list": "My List", "todo": ["Task 1"], "done": [] }]';
 
 const Clipboard = St.Clipboard.get_default();
 const CLIPBOARD_TYPE = St.ClipboardType.CLIPBOARD;
+
+const LIST_ID = 0;
+const ELLIPSIS = '\u2026';
 
 let todolist;	// Todolist instance
 let meta;
@@ -46,7 +50,7 @@ class TodoList extends PanelMenu.Button {
 		this.meta = meta;
 
 		// Tasks file
-		this.filePath = GLib.get_home_dir() + "/.list.tasks";
+		this.filePath = GLib.get_home_dir() + "/.todo.json";
 
 		// Locale
 		let locales = this.meta.path + "/locale";
@@ -54,9 +58,14 @@ class TodoList extends PanelMenu.Button {
 
 		// Button ui
 		this.mainBox = null;
-		this.buttonText = new St.Label({text:_("(...)"), y_align: Clutter.ActorAlign.CENTER});
+		this.icon = new St.Icon({icon_name: 'emblem-documents-symbolic', style_class: 'system-status-icon'});
+		this.buttonText = new St.Label({text: ELLIPSIS, y_align: Clutter.ActorAlign.CENTER});
 		this.buttonText.set_style("text-align:center;");
-		this.actor.add_actor(this.buttonText);
+
+		let topBox = new St.BoxLayout({ vertical: false, style_class: 'panel-status-menu-box' });
+        topBox.add_child(this.icon);
+		topBox.add_child(this.buttonText);
+		this.add_child(topBox);
 
 		this._buildUI();
 		this._refresh();
@@ -71,20 +80,37 @@ class TodoList extends PanelMenu.Button {
 		this.mainBox = new St.BoxLayout();
 		this.mainBox.set_vertical(true);
 
-		// Create todos box
-		this.todosBox = new St.BoxLayout();
-		this.todosBox.set_vertical(true);
+		// Separator
+		this.mainBox.add_actor(new PopupMenu.PopupSeparatorMenuItem("TODO"));
+
+		// Create todo box
+		this.todoBox = new St.BoxLayout();
+		this.todoBox.set_vertical(true);
 
 		// Create todos scrollview
 		var scrollView = new St.ScrollView({style_class: 'vfade',
 			hscrollbar_policy: Gtk.PolicyType.NEVER,
 			vscrollbar_policy: Gtk.PolicyType.AUTOMATIC});
-		scrollView.add_actor(this.todosBox);
+		scrollView.add_actor(this.todoBox);
+		this.mainBox.add_actor(scrollView);
+
+		// Separator
+		this.mainBox.add_actor(new PopupMenu.PopupSeparatorMenuItem("DONE"));
+
+		// Create done box
+		this.doneBox = new St.BoxLayout();
+		this.doneBox.set_vertical(true);
+
+		// Create dones scrollview
+		var scrollView = new St.ScrollView({style_class: 'vfade',
+			hscrollbar_policy: Gtk.PolicyType.NEVER,
+			vscrollbar_policy: Gtk.PolicyType.AUTOMATIC});
+		scrollView.add_actor(this.doneBox);
 		this.mainBox.add_actor(scrollView);
 
 		// Separator
 		var separator = new PopupMenu.PopupSeparatorMenuItem();
-		this.mainBox.add_actor(separator.actor);
+		this.mainBox.add_actor(separator);
 
 		// Text entry
 		this.newTask = new St.Entry(
@@ -121,26 +147,18 @@ class TodoList extends PanelMenu.Button {
 
 		// Check if tasks file exists
 		checkFile(this.filePath);
+		let taskList = readTasks(this.filePath)[LIST_ID];
 
 		// Add all tasks to ui
-		this.todosBox.destroy_all_children();
-		let content = Shell.get_file_contents_utf8_sync(this.filePath);
-		let lines = content.toString().split('\n');
 		let tasks = 0;
-		for (let i=0; i<lines.length; i++)
-		{
-			if (lines[i] != '' && lines[i] != '\n')
-			{
-				let item = new PopupMenu.PopupMenuItem(lines[i]);
-				let textClicked = lines[i];
-				item.connect('activate', Lang.bind(this,function(){
-					this.menu.close();
-					this.buttonText.set_text(_("(...)"));
-					removeTask(textClicked,this.filePath);
-				}));
-				this.todosBox.add(item.actor);
-				tasks += 1;
-			}
+		this.todoBox.destroy_all_children();
+		for (const task of taskList.todo.filter(task => task != '' && task != '\n')) {
+			this.todoBox.add(createItem(this, task, removeTodo));
+			tasks += 1;
+		}
+		this.doneBox.destroy_all_children();
+		for (const task of taskList.done.filter(task => task != '' && task != '\n')) {
+			this.doneBox.add(createItem(this, task, removeDone, "doneTaskEntry"));
 		}
 
 		// Update status button
@@ -186,15 +204,23 @@ function signalKeyOpen(){
 	}
 }
 
-// Check if file exists. Create it if not
-function checkFile(file){
-	if (!GLib.file_test(file, GLib.FileTest.EXISTS))
-		GLib.file_set_contents(file,BASE_TASKS);
+function createItem(parent, text, removeFunc, style)
+{
+	let item = new PopupMenu.PopupMenuItem(text);
+	if (typeof style !== 'undefined') {
+		item.label.set_style_class_name("doneTaskEntry");
+	}
+	let textClicked = text;
+	item.connect('activate', Lang.bind(parent,function(){
+		parent.menu.close();
+		parent.buttonText.set_text(_("(...)"));
+		removeFunc(textClicked,parent.filePath);
+	}));
+	return item;
 }
 
-// Remove task 'text' from file 'file'
-function removeTask(text,file){
-
+// Read tasks from file
+function readTasks(file){
 	// Check if file exists
 	if (!GLib.file_test(file, GLib.FileTest.EXISTS))
 	{
@@ -202,35 +228,70 @@ function removeTask(text,file){
 		return;
 	}
 
-	// Create new text to write
-	let content = Shell.get_file_contents_utf8_sync(file);
-	let tasks = content.toString().split('\n');
-	let newText = "";
-	for (let i=0; i<tasks.length; i++)
+    let content = Shell.get_file_contents_utf8_sync(file);
+    let	obj = JSON.parse(content.toString());
+	return obj;
+}
+
+// Write tasks to file
+function writeTasks(tasks, file)
+{
+	// Check if file exists
+	if (!GLib.file_test(file, GLib.FileTest.EXISTS))
 	{
-		// Add task to new text if not empty and not removed task
-		if (tasks[i] != text && tasks[i] != '' && tasks[i] != '\n')
-		{
-			newText += tasks[i];
-			newText += "\n";
-		}
+		global.logError("Todo list : Error with file : " + file);
+		return;
 	}
 
-	// Write new text to file
 	let f = Gio.file_new_for_path(file);
 	let out = f.replace(null, false, Gio.FileCreateFlags.NONE, null);
-	Shell.write_string_to_stream (out, newText);
+	Shell.write_string_to_stream (out, JSON.stringify(tasks));
+	out.close(null);
+}
+
+// Check if file exists. Create it if not
+function checkFile(file){
+	if (!GLib.file_test(file, GLib.FileTest.EXISTS))
+		GLib.file_set_contents(file,BASE_TASKS);
+}
+
+// Remove task from todo list
+function removeTodo(text,file){
+
+    // Append to done & remove from todo
+	let	todos = readTasks(file);
+	todos[LIST_ID].done.push(text);
+	todos[LIST_ID].todo = todos[LIST_ID].todo.filter(task => task != text);
+	log(JSON.stringify(todos))
+
+	// Write new text to file
+    writeTasks(todos, file);
 
 	// Copy removed item to clipboard if enabled
 	if(ExtensionSettings.get_boolean('clipboard'))
 		Clipboard.set_text(CLIPBOARD_TYPE, text);
-
-	out.close(null);
 }
+
+// Remove task from todo list
+function removeDone(text,file){
+
+	let	todos = readTasks(file);
+	todos[LIST_ID].done = todos[LIST_ID].done.filter(task => task != text);
+	log(JSON.stringify(todos))
+
+	// Write new text to file
+	writeTasks(todos, file);
+
+	// Copy removed item to clipboard if enabled
+	if(ExtensionSettings.get_boolean('clipboard'))
+		Clipboard.set_text(CLIPBOARD_TYPE, text);
+}
+
 
 // Add task 'text' to file 'file'
 function addTask(text,file)
 {
+    log(text + " " + file);
 	// Don't add empty task
 	if (text == '' || text == '\n')
 		return;
@@ -242,15 +303,12 @@ function addTask(text,file)
 		return;
 	}
 
-	// Append to content
+	// Append to new items
 	let content = Shell.get_file_contents_utf8_sync(file);
-	content = content + text + "\n";
+	let	todos = JSON.parse(content.toString());
+	todos[LIST_ID].todo.push(text);
 
-	// Write new text to file
-	let f = Gio.file_new_for_path(file);
-	let out = f.replace(null, false, Gio.FileCreateFlags.NONE, null);
-	Shell.write_string_to_stream (out, content);
-	out.close(null);
+	writeTasks(todos, file);
 }
 
 //----------------------------------------------------------------------
